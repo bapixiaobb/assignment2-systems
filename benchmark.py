@@ -40,10 +40,11 @@ MODEL_CONFIGS = {
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark script for Language Modeling")
-    parser.add_argument("--mode", choices=["forward", "backward", "forward_backward", "optimizer", "training"], default="forward", help="Benchmark mode")
-    parser.add_argument("--model-size", choices=tuple(MODEL_CONFIGS), default="small", help="Model size")
-    parser.add_argument("--num-iterations", type=int, default=10, help="Number of iterations for benchmarking")
-    parser.add_argument("--num-warmup", type=int, default=5, help="Number of warmup iterations before benchmarking")
+    parser.add_argument("--mode", "-m", choices=["forward", "backward", "forward_backward", "optimizer", "training"], default="forward", help="Benchmark mode")
+    parser.add_argument("--model-size", "-s", choices=tuple(MODEL_CONFIGS), default="small", help="Model size")
+    parser.add_argument("--num-iterations", "-i", type=int, default=10, help="Number of iterations for benchmarking")
+    parser.add_argument("--num-warmup", "-w", type=int, default=5, help="Number of warmup iterations before benchmarking")
+    parser.add_argument("--device-id", "-d", type=int, default=0, help="NPU or CUDA device index")
     return parser.parse_args()
 
 def get_device():
@@ -64,11 +65,41 @@ def validate_device(device):
     if device not in ("cpu", "cuda", "npu"):
         raise ValueError(f"Unsupported device: {device}")
 
+def configure_device(device_type, device_id):
+    validate_device(device_type)
+
+    if device_id < 0:
+        raise ValueError(f"Device ID must be non-negative, got {device_id}")
+
+    if device_type == "cpu":
+        return torch.device("cpu")
+
+    if device_type == "cuda":
+        device_count = torch.cuda.device_count()
+        if device_id >= device_count:
+            raise ValueError(
+                f"CUDA device ID {device_id} is unavailable; "
+                f"this process can see {device_count} CUDA device(s)"
+            )
+        device = torch.device(f"cuda:{device_id}")
+        torch.cuda.set_device(device)
+        return device
+
+    device_count = torch.npu.device_count()
+    if device_id >= device_count:
+        raise ValueError(
+            f"NPU device ID {device_id} is unavailable; "
+            f"this process can see {device_count} NPU device(s)"
+        )
+    device = torch.device(f"npu:{device_id}")
+    torch.npu.set_device(device)
+    return device
+
 def sync_device(device):
-    if device == "cuda":
-        torch.cuda.synchronize()
-    elif device == "npu":
-        torch.npu.synchronize()
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "npu":
+        torch.npu.synchronize(device)
 
 def benchmark_forward(model, input_ids, device, num_iterations=10, num_warmup=5):
     # warm up
@@ -188,8 +219,8 @@ def main():
     args = parse_args()
     model_size = args.model_size
     config = MODEL_CONFIGS[model_size]
-    device = get_device()
-    validate_device(device)
+    device_type = get_device()
+    device = configure_device(device_type, args.device_id)
     print(f"Running benchmark on device: {device}")
     print(f"Model size: {model_size}")
     print(f"Model configuration: {config}")
@@ -214,12 +245,8 @@ def main():
     )
 
 
-    if device == "cuda":
-        model.cuda()
-        input_ids = input_ids.cuda()
-    elif device == "npu":
-        model.npu()
-        input_ids = input_ids.npu()
+    model = model.to(device)
+    input_ids = input_ids.to(device)
 
     # optimizer = AdamW(model.parameters(), lr=1e-3)
     # ==========================
